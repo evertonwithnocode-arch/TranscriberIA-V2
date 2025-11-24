@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia o restante do código
 COPY . .
 
+COPY cookies.txt /app/cookies.txt
+
+
 # Expõe porta que o Render usa
 EXPOSE 8000
 
