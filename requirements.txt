@@ -1,8 +1,5 @@
 fastapi
 uvicorn
-faster-whisper
 yt-dlp
-pydantic
-python-multipart
-runpod
 pydub
+openai
