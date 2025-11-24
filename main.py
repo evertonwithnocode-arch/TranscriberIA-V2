@@ -51,6 +51,12 @@ def split_audio(file_path, max_duration_sec=1390):
 
 def process_video(job_id, url):
     try:
+        # Verificação do cookies.txt
+        if not os.path.isfile("/app/cookies.txt"):
+            raise FileNotFoundError("Arquivo cookies.txt não encontrado em /app/cookies.txt")
+        else:
+            log(f"Job {job_id}: cookies.txt encontrado e pronto para uso")
+
         log(f"Job {job_id}: Iniciando download do vídeo: {url}")
         audio_id = str(uuid.uuid4())
         base_path = os.path.join(OUTPUT_DIR, audio_id)
@@ -60,6 +66,9 @@ def process_video(job_id, url):
             info_dict = ydl.extract_info(url, download=False)
             video_title = info_dict.get("title", "Vídeo do YouTube")
             log(f"Job {job_id}: Título do vídeo obtido: {video_title}")
+
+        # Resto do seu código...
+
 
         # Baixa o áudio
         ydl_opts = {
