@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+openai
 yt-dlp
 pydub
-openai
+python-multipart
