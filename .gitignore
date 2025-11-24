@@ -1,20 +1,32 @@
 # Python
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.swp
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Byte-compiled / cache
 *.pyc
 *.pyo
 *.pyd
+*.pdb
 
-# Virtual environments
-venv/
-.env/
-.env.bak/
-
-# IDE
+# VSCode settings
 .vscode/
-.idea/
+
+# MacOS
+.DS_Store
 
 # Logs
 *.log
 
-# Cache
-.cache/
+# Downloads / output
+downloads/
+
+# Secrets (opcional)
+*.env
