@@ -65,6 +65,7 @@ def process_video(job_id, url):
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": base_path,
+            "cookies": "cookies.txt",
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
             ]
