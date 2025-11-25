@@ -2,8 +2,8 @@ from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp, uuid, os, threading, time
 from openai import OpenAI
-from pydub import AudioSegment
 import traceback
+import subprocess
 
 app = FastAPI()
 
@@ -18,7 +18,7 @@ app.add_middleware(
 OUTPUT_DIR = "downloads"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-openai_api_key = os.environ.get("OPENAI_API_KEY")
+openai_api_key = "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"
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY não encontrada nas variáveis de ambiente")
 client = OpenAI(api_key=openai_api_key)
@@ -34,22 +34,34 @@ def chunk_text(text, chunk_size=2000):
         yield " ".join(words[i:i+chunk_size])
 
 def split_audio(file_path, max_duration_sec=1390):
-    audio = AudioSegment.from_file(file_path)
-    chunk_length_ms = max_duration_sec * 1000
     chunks = []
-    total_chunks = (len(audio) + chunk_length_ms - 1) // chunk_length_ms
-    for i, start in enumerate(range(0, len(audio), chunk_length_ms)):
-        chunk = audio[start:start+chunk_length_ms]
-        chunk_file = f"{file_path}_part{i}.mp3"
-        chunk.export(chunk_file, format="mp3")
-        chunks.append(chunk_file)
-        log(f"Chunk {i+1}/{total_chunks}: {len(chunk)/1000:.2f}s -> {chunk_file}")
+    output_template = f"{file_path}_part%03d.mp3"
+
+    # Rodar o ffmpeg para dividir
+    cmd = [
+        "ffmpeg", "-i", file_path,
+        "-f", "segment",
+        "-segment_time", str(max_duration_sec),
+        "-c", "copy",
+        output_template
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # Coletar arquivos gerados
+    base_dir = os.path.dirname(file_path)
+    base_name = os.path.basename(file_path)
+
+    for file in sorted(os.listdir(base_dir)):
+        if file.startswith(base_name + "_part") and file.endswith(".mp3"):
+            chunks.append(os.path.join(base_dir, file))
+
     return chunks
 
 
 def process_video(job_id, url):
     try:
-        cookies_path = "/app/cookies.txt"
+        cookies_path = "cookies.txt"
 
         # 🔥 NOVO → Verificação + EXIBIÇÃO DO cookies.txt
         if not os.path.isfile(cookies_path):
@@ -111,11 +123,20 @@ def process_video(job_id, url):
         for i, chunk in enumerate(chunk_text(transcribed_text)):
             log(f"Job {job_id}: Resumindo chunk {i+1}")
             summary_response = client.chat.completions.create(
-                model="gpt-4.1",
-                messages=[
-                    {"role": "system", "content": "Você é um assistente que gera resumos claros e objetivos."},
-                    {"role": "user", "content": "Resuma:\n\n" + chunk}
-                ],
+    model="gpt-4.1",
+    messages=[
+            {
+                 "role": "system",
+                 "content": (
+                 "Você é um assistente especializado em resumir transcrições de reuniões de câmaras de vereadores. "
+                 "Seu objetivo é gerar um resumo claro e objetivo destacando apenas os principais pontos discutidos, "
+                 "decisões tomadas e ações definidas. "
+                 "Evite repetições, comentários irrelevantes ou conversas paralelas. "
+                 "O resumo deve ser organizado em tópicos e começar com o título 'Principais Pontos:'"
+            )
+            },
+                {"role": "user", "content": "Resuma:\n\n" + chunk}
+             ],
                 temperature=0.3
             )
             partial_summaries.append(summary_response.choices[0].message.content)
