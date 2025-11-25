@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import uuid, threading, time, traceback, io
+import yt_dlp, uuid, os, threading, time
 from openai import OpenAI
-from pytubefix import YouTube  # 🔥 Mudança: pytubefix em vez de pytube (corrige HTTP 400)
+from pydub import AudioSegment
+import traceback
 
 app = FastAPI()
 
@@ -14,117 +15,224 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-openai_api_key = "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"
+OUTPUT_DIR = "downloads"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+if not openai_api_key:
+    raise ValueError("OPENAI_API_KEY não encontrada! Configure ela no ambiente.")
+
 client = OpenAI(api_key=openai_api_key)
 
 jobs = {}
 
+# -----------------------------------------
+# LOG
+# -----------------------------------------
+def log(message: str):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}")
 
-def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
-
+# -----------------------------------------
+# DIVISÃO DE TEXTO
+# -----------------------------------------
 def chunk_text(text, chunk_size=2000):
     words = text.split()
     for i in range(0, len(words), chunk_size):
         yield " ".join(words[i:i+chunk_size])
 
 
+# -----------------------------------------
+# DIVISÃO DO ÁUDIO
+# -----------------------------------------
+def split_audio(file_path, max_duration_sec=1390):
+    audio = AudioSegment.from_file(file_path)
+    chunk_length_ms = max_duration_sec * 1000
+    chunks = []
+
+    total_chunks = (len(audio) + chunk_length_ms - 1) // chunk_length_ms
+
+    for i, start in enumerate(range(0, len(audio), chunk_length_ms)):
+        chunk = audio[start:start+chunk_length_ms]
+        chunk_file = f"{file_path}_part{i}.mp3"
+        chunk.export(chunk_file, format="mp3")
+        chunks.append(chunk_file)
+        log(f"Chunk {i+1}/{total_chunks}: {len(chunk)/1000:.2f}s -> {chunk_file}")
+
+    return chunks
+
+
+# =====================================================================
+# PROCESSAMENTO COMPLETO DO VÍDEO
+# =====================================================================
 def process_video(job_id, url):
+
     try:
-        log(f"Job {job_id}: Iniciando processamento da URL: {url}")
+        cookies_path = "cookies.txt"
 
-        # 🔥 PASSO 1: BAIXAR ÁUDIO COM PYTUBEFIX EM MEMÓRIA
-        log(f"Job {job_id}: Baixando áudio com pytubefix...")
-        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)  # Desabilita OAuth pra evitar prompts desnecessários
-        title = yt.title  # Agora funciona sem erro 400
-        stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()  # Melhor qualidade de áudio
-        if not stream:
-            raise ValueError("Nenhum stream de áudio disponível (vídeo privado ou erro)")
-        
-        buffer = io.BytesIO()  # Buffer em memória
-        stream.stream_to_buffer(buffer)  # Baixa direto para bytes
-        buffer.seek(0)
+        # ----------------------------
+        # VERIFICA COOKIES
+        # ----------------------------
+        if not os.path.isfile(cookies_path):
+            raise FileNotFoundError("Arquivo cookies.txt não encontrado em /app/cookies.txt")
 
-        buffer_size = len(buffer.read())  # Log do tamanho pra debug
-        log(f"Job {job_id}: Áudio baixado ({buffer_size} bytes) - Título: {title}")
+        log(f"Job {job_id}: cookies.txt encontrado ({cookies_path})")
 
-        if buffer_size > 25 * 1024 * 1024:  # Limite OpenAI ~25MB
-            raise ValueError("Áudio muito grande (>25MB) - Use AssemblyAI para vídeos longos")
+        # ----------------------------
+        # OBTÉM TÍTULO
+        # ----------------------------
+        log(f"Job {job_id}: Iniciando download: {url}")
 
-        # 🔥 PASSO 2: TRANSCRIÇÃO COM OPENAI (Whisper)
-        buffer.seek(0)  # Reset buffer
-        log(f"Job {job_id}: Enviando áudio para transcrição...")
-        transcription = client.audio.transcriptions.create(
-            model="whisper-1",  # Oficial e estável
-            file=("audio.webm", buffer, "audio/webm"),  # MIME type flexível (aceita webm/m4a/mp3)
-            language="pt"  # Português BR
-        )
-        transcribed_text = transcription.text
-        log(f"Job {job_id}: Transcrição concluída ({len(transcribed_text)} chars)")
+        audio_id = str(uuid.uuid4())
+        base_path = os.path.join(OUTPUT_DIR, audio_id)
 
-        # 🔥 PASSO 3: RESUMO EM PARTES
-        partial_summaries = []
-        for idx, chunk in enumerate(chunk_text(transcribed_text)):
-            log(f"Job {job_id}: Resumindo chunk {idx+1}")
+        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+            info_dict = ydl.extract_info(url, download=False)
+            video_title = info_dict.get("title", "Vídeo do YouTube")
 
-            summary = client.chat.completions.create(
-                model="gpt-4o",  # Modelo válido
-                messages=[
-                    {
-                        "role": "system",
-                       "content": (
-                            "Você é um assistente especializado em resumir transcrições de reuniões de câmaras de vereadores. "
-                            "Gere um resumo claro e objetivo, destacando apenas:\n"
-                            "- Principais pontos discutidos\n"
-                            "- Decisões tomadas\n"
-                            "- Ações definidas\n\n"
-                            "Use bullet points, evite repetições e conversas paralelas. "
-                            "Comece o resumo sempre com o título: Principais Pontos:"
-                        )
-                    },
-                    {"role": "user", "content": chunk}
-                ],
-                temperature=0.3
-            )
+        log(f"Job {job_id}: Título: {video_title}")
 
-            partial_summaries.append(summary.choices[0].message.content)
-
-        # 🔥 PASSO 4: COMBINA RESUMOS
-        combined_prompt = "\n\n".join(partial_summaries)
-        log(f"Job {job_id}: Combinando resumos...")
-
-        final_summary = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Combine todos os resumos parciais em um único resumo final claro, organizado em bullet points e começando obrigatoriamente com 'Principais Pontos:'"},
-                {"role": "user", "content": combined_prompt}
-            ],
-            temperature=0.3
-        ).choices[0].message.content
-
-        # 🔥 FINALIZA O JOB
-        jobs[job_id] = {
-            "status": "done",
-            "title": title,
-            "transcription": transcribed_text,
-            "summary": final_summary,
+        # ----------------------------
+        # BAIXA O ÁUDIO
+        # ----------------------------
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": base_path,
+            "cookiefile": cookies_path,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192"
+                }
+            ]
         }
 
-        log(f"Job {job_id}: Finalizado com sucesso!")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        final_path = base_path + ".mp3"
+        log(f"Job {job_id}: Áudio baixado: {final_path}")
+
+        # ----------------------------
+        # DIVIDE O ÁUDIO
+        # ----------------------------
+        audio_chunks = split_audio(final_path)
+        log(f"Job {job_id}: Total partes: {len(audio_chunks)}")
+
+        # ----------------------------
+        # TRANSCRIÇÃO
+        # ----------------------------
+        transcriptions = []
+
+        for i, chunk_file in enumerate(audio_chunks):
+            log(f"Job {job_id}: Transcrevendo parte {i+1}")
+
+            with open(chunk_file, "rb") as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="gpt-4o-transcribe",
+                    file=audio_file
+                )
+
+            transcriptions.append(transcript.text)
+
+        transcribed_text = "\n".join(transcriptions)
+        log(f"Job {job_id}: Transcrição concluída ({len(transcribed_text)} chars)")
+
+        # =====================================================================
+        # RESUMO (PARA ATA COMPLETA)
+        # =====================================================================
+
+        ATA_PROMPT = (
+            "Você é um assistente especializado em gerar **atas completas de sessões de câmaras de vereadores**.\n\n"
+            "REGRAS ESTRITAS:\n"
+            "1. A ata deve ser **detalhada**, nunca superficial.\n"
+            "2. Incluir **fala de cada vereador**, com clareza e precisão.\n"
+            "3. Para cada projeto, incluir:\n"
+            "   - número de votos favoráveis\n"
+            "   - votos contrários (se houver)\n"
+            "   - abstenções (se houver)\n"
+            "   - quem pediu a palavra e o que disse\n"
+            "4. Organizar obrigatoriamente em:\n"
+            "   **I – Expediente**\n"
+            "   **II – Ordem do Dia**\n"
+            "   **III – Explicações Pessoais**\n"
+            "5. Não inventar nomes ou fatos: usar somente o que estiver no áudio.\n"
+            "6. A linguagem deve ser **formal, legislativa e clara**.\n"
+            "7. Transformar fal falas soltas em narrativa institucional.\n"
+            "8. Nunca encurtar demais: manter riqueza de detalhes.\n\n"
+            "Agora, gere a ATA do seguinte trecho:\n\n"
+        )
+
+        partial_summaries = []
+
+        for i, chunk in enumerate(chunk_text(transcribed_text)):
+            log(f"Job {job_id}: Gerando ata do chunk {i+1}")
+
+            response = client.chat.completions.create(
+                model="gpt-4.1",
+                messages=[
+                    {"role": "system", "content": ATA_PROMPT},
+                    {"role": "user", "content": chunk}
+                ],
+                temperature=0.2
+            )
+
+            partial_summaries.append(response.choices[0].message.content)
+
+        # ----------------------------
+        # ATA FINAL COMBINADA
+        # ----------------------------
+        combined = "\n\n".join(partial_summaries)
+
+        final_ata = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Você deve combinar vários trechos de ata em uma única ata completa, "
+                        "mantendo fidelidade total ao conteúdo e organização legislativa:"
+                        "\nI – Expediente\nII – Ordem do Dia\nIII – Explicações Pessoais\n"
+                        "Não resuma: apenas una, organize e ajuste a redação."
+                    )
+                },
+                {"role": "user", "content": combined}
+            ],
+            temperature=0.1
+        )
+
+        ata_final = final_ata.choices[0].message.content
+
+        jobs[job_id] = {
+            "status": "done",
+            "title": video_title,
+            "transcription": transcribed_text,
+            "summary": ata_final
+        }
+
+        log(f"Job {job_id}: Finalizado!")
 
     except Exception as e:
-        log(f"Job {job_id}: Erro: {e}")
+        log(f"Job {job_id}: ERRO: {str(e)}")
         log(traceback.format_exc())
         jobs[job_id] = {"status": "error", "error": str(e)}
 
+
+
+# =====================================================================
+# ROTAS FASTAPI
+# =====================================================================
 
 @app.post("/start-job")
 async def start_job(url: str = Form(...)):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "processing"}
     log(f"Job {job_id}: Criado")
+
     threading.Thread(target=process_video, args=(job_id, url)).start()
+
     return {"job_id": job_id}
 
 
