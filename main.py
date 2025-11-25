@@ -1,9 +1,8 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp, uuid, os, threading, time
+import uuid, threading, time, traceback, io
 from openai import OpenAI
-import traceback
-import subprocess
+from pytubefix import YouTube  # 🔥 Mudança: pytubefix em vez de pytube (corrige HTTP 400)
 
 app = FastAPI()
 
@@ -15,157 +14,109 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OUTPUT_DIR = "downloads"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 openai_api_key = "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"
-
 client = OpenAI(api_key=openai_api_key)
 
 jobs = {}
 
-def log(message: str):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}")
+
+def log(msg):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
 
 def chunk_text(text, chunk_size=2000):
     words = text.split()
     for i in range(0, len(words), chunk_size):
         yield " ".join(words[i:i+chunk_size])
 
-def split_audio(file_path, max_duration_sec=1390):
-    chunks = []
-    output_template = f"{file_path}_part%03d.mp3"
-
-    # Rodar o ffmpeg para dividir
-    cmd = [
-        "ffmpeg", "-i", file_path,
-        "-f", "segment",
-        "-segment_time", str(max_duration_sec),
-        "-c", "copy",
-        output_template
-    ]
-
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    # Coletar arquivos gerados
-    base_dir = os.path.dirname(file_path)
-    base_name = os.path.basename(file_path)
-
-    for file in sorted(os.listdir(base_dir)):
-        if file.startswith(base_name + "_part") and file.endswith(".mp3"):
-            chunks.append(os.path.join(base_dir, file))
-
-    return chunks
-
 
 def process_video(job_id, url):
     try:
-        cookies_path = "cookies.txt"
+        log(f"Job {job_id}: Iniciando processamento da URL: {url}")
 
-        # 🔥 NOVO → Verificação + EXIBIÇÃO DO cookies.txt
-        if not os.path.isfile(cookies_path):
-            raise FileNotFoundError("Arquivo cookies.txt não encontrado em /app/cookies.txt")
-        else:
-            log(f"Job {job_id}: cookies.txt encontrado ({cookies_path})")
+        # 🔥 PASSO 1: BAIXAR ÁUDIO COM PYTUBEFIX EM MEMÓRIA
+        log(f"Job {job_id}: Baixando áudio com pytubefix...")
+        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)  # Desabilita OAuth pra evitar prompts desnecessários
+        title = yt.title  # Agora funciona sem erro 400
+        stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()  # Melhor qualidade de áudio
+        if not stream:
+            raise ValueError("Nenhum stream de áudio disponível (vídeo privado ou erro)")
+        
+        buffer = io.BytesIO()  # Buffer em memória
+        stream.stream_to_buffer(buffer)  # Baixa direto para bytes
+        buffer.seek(0)
 
-            # Exibe tamanho
-            file_size = os.path.getsize(cookies_path)
-            log(f"Job {job_id}: Tamanho do cookies.txt: {file_size} bytes")
+        buffer_size = len(buffer.read())  # Log do tamanho pra debug
+        log(f"Job {job_id}: Áudio baixado ({buffer_size} bytes) - Título: {title}")
 
-            # Exibe conteúdo
-            with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+        if buffer_size > 25 * 1024 * 1024:  # Limite OpenAI ~25MB
+            raise ValueError("Áudio muito grande (>25MB) - Use AssemblyAI para vídeos longos")
 
-            log(f"Job {job_id}: Conteúdo do cookies.txt:\n\n{content}\n\n=== FIM DO ARQUIVO ===")
+        # 🔥 PASSO 2: TRANSCRIÇÃO COM OPENAI (Whisper)
+        buffer.seek(0)  # Reset buffer
+        log(f"Job {job_id}: Enviando áudio para transcrição...")
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1",  # Oficial e estável
+            file=("audio.webm", buffer, "audio/webm"),  # MIME type flexível (aceita webm/m4a/mp3)
+            language="pt"  # Português BR
+        )
+        transcribed_text = transcription.text
+        log(f"Job {job_id}: Transcrição concluída ({len(transcribed_text)} chars)")
 
-        log(f"Job {job_id}: Iniciando download do vídeo: {url}")
-        audio_id = str(uuid.uuid4())
-        base_path = os.path.join(OUTPUT_DIR, audio_id)
-
-        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
-            info_dict = ydl.extract_info(url, download=False)
-            video_title = info_dict.get("title", "Vídeo do YouTube")
-            log(f"Job {job_id}: Título obtido: {video_title}")
-
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": base_path,
-            "cookiefile": cookies_path,
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-            ]
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        final_path = base_path + ".mp3"
-        log(f"Job {job_id}: Áudio baixado: {final_path}")
-
-        audio_chunks = split_audio(final_path)
-        log(f"Job {job_id}: Dividido em {len(audio_chunks)} partes")
-
-        transcriptions = []
-        for i, chunk_file in enumerate(audio_chunks):
-            log(f"Job {job_id}: Transcrevendo parte {i+1}")
-            with open(chunk_file, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="gpt-4o-transcribe",
-                    file=audio_file
-                )
-                transcriptions.append(transcript.text)
-
-        transcribed_text = "\n".join(transcriptions)
-        log(f"Job {job_id}: Transcrição finalizada ({len(transcribed_text)} chars)")
-
+        # 🔥 PASSO 3: RESUMO EM PARTES
         partial_summaries = []
-        for i, chunk in enumerate(chunk_text(transcribed_text)):
-            log(f"Job {job_id}: Resumindo chunk {i+1}")
-            summary_response = client.chat.completions.create(
-    model="gpt-4.1",
-    messages=[
-            {
-                 "role": "system",
-                 "content": (
-                 "Você é um assistente especializado em resumir transcrições de reuniões de câmaras de vereadores. "
-                 "Seu objetivo é gerar um resumo claro e objetivo destacando apenas os principais pontos discutidos, "
-                 "decisões tomadas e ações definidas. "
-                 "Evite repetições, comentários irrelevantes ou conversas paralelas. "
-                 "O resumo deve ser organizado em tópicos e começar com o título 'Principais Pontos:'"
-            )
-            },
-                {"role": "user", "content": "Resuma:\n\n" + chunk}
-             ],
+        for idx, chunk in enumerate(chunk_text(transcribed_text)):
+            log(f"Job {job_id}: Resumindo chunk {idx+1}")
+
+            summary = client.chat.completions.create(
+                model="gpt-4o",  # Modelo válido
+                messages=[
+                    {
+                        "role": "system",
+                       "content": (
+                            "Você é um assistente especializado em resumir transcrições de reuniões de câmaras de vereadores. "
+                            "Gere um resumo claro e objetivo, destacando apenas:\n"
+                            "- Principais pontos discutidos\n"
+                            "- Decisões tomadas\n"
+                            "- Ações definidas\n\n"
+                            "Use bullet points, evite repetições e conversas paralelas. "
+                            "Comece o resumo sempre com o título: Principais Pontos:"
+                        )
+                    },
+                    {"role": "user", "content": chunk}
+                ],
                 temperature=0.3
             )
-            partial_summaries.append(summary_response.choices[0].message.content)
 
+            partial_summaries.append(summary.choices[0].message.content)
+
+        # 🔥 PASSO 4: COMBINA RESUMOS
         combined_prompt = "\n\n".join(partial_summaries)
-        final_summary_response = client.chat.completions.create(
-            model="gpt-4.1",
+        log(f"Job {job_id}: Combinando resumos...")
+
+        final_summary = client.chat.completions.create(
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Você é um assistente que gera resumos."},
-                {"role": "user", "content": "Combine os resumos:\n\n" + combined_prompt}
+                {"role": "system", "content": "Combine todos os resumos parciais em um único resumo final claro, organizado em bullet points e começando obrigatoriamente com 'Principais Pontos:'"},
+                {"role": "user", "content": combined_prompt}
             ],
             temperature=0.3
-        )
+        ).choices[0].message.content
 
-        summarized_text = final_summary_response.choices[0].message.content
-
+        # 🔥 FINALIZA O JOB
         jobs[job_id] = {
             "status": "done",
-            "title": video_title,
+            "title": title,
             "transcription": transcribed_text,
-            "summary": summarized_text
+            "summary": final_summary,
         }
 
         log(f"Job {job_id}: Finalizado com sucesso!")
 
     except Exception as e:
-        log(f"Job {job_id}: Erro: {str(e)}")
+        log(f"Job {job_id}: Erro: {e}")
         log(traceback.format_exc())
         jobs[job_id] = {"status": "error", "error": str(e)}
-
 
 
 @app.post("/start-job")
