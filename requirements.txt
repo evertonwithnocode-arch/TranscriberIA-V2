@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-openai
 yt-dlp
-pydub
-python-multipart
+openai
+ffmpeg-python
