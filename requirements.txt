@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-yt-dlp
+pytubefix
 openai
 ffmpeg-python
 python-multipart
