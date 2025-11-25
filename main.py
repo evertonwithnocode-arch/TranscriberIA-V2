@@ -18,7 +18,7 @@ app.add_middleware(
 OUTPUT_DIR = "downloads"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-openai_api_key = "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"
+openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY não encontrada nas variáveis de ambiente")
 client = OpenAI(api_key=openai_api_key)
