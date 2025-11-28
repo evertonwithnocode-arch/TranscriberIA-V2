@@ -4,3 +4,4 @@ pytubefix
 openai
 ffmpeg-python
 python-multipart
+yt_dlp
