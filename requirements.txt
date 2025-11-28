@@ -5,3 +5,5 @@ openai
 ffmpeg-python
 python-multipart
 yt_dlp
+pydub
+requests
