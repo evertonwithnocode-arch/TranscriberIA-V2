@@ -267,3 +267,8 @@ async def job_status(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job não encontrado")
     return jobs[job_id]
+
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "API rodando"}
