@@ -4,12 +4,36 @@ import yt_dlp, uuid, os, threading, time
 from openai import OpenAI
 from pydub import AudioSegment
 import traceback
+from fastapi.responses import JSONResponse
+from fastapi import Request
 
 app = FastAPI()
 
+ALLOWED_ORIGINS = [
+    "https://transcribeia.lovable.app",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://localhost",
+    "http://127.0.0.1"
+]
+
+@app.middleware("http")
+async def block_disallowed_origins(request: Request, call_next):
+    origin = request.headers.get("origin")
+
+    # permite requisições sem origin (Postman, curl)
+    if origin and origin not in ALLOWED_ORIGINS:
+        return JSONResponse(
+            {"detail": "Origin not allowed"},
+            status_code=403
+        )
+
+    return await call_next(request)
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,  # <-- correção
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -17,6 +41,8 @@ app.add_middleware(
 
 OUTPUT_DIR = "downloads"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
